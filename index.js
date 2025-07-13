@@ -1,173 +1,205 @@
 import * as cheerio from "cheerio";
 import puppeteerExtra from "puppeteer-extra";
 import stealthPlugin from "puppeteer-extra-plugin-stealth";
-import { createObjectCsvWriter } from 'csv-writer';
+import { createObjectCsvWriter } from "csv-writer";
+import axios from "axios";
+import * as https from "https";
+import fs from "fs";
 
-init();
 
-async function searchGoogleMaps() {
+puppeteerExtra.use(stealthPlugin());
+
+
+const cities = ["Budapest", "Debrecen", "Szeged", "Miskolc", "Pécs", "Győr"];
+
+const csvWriter = createObjectCsvWriter({
+  path: "Hungary_Dentists.csv",
+  header: [
+    { id: "index", title: "Index" },
+    { id: "clinicName", title: "Clinic Name" },
+    { id: "dentistName", title: "Dentist Name" },
+    { id: "address", title: "Address" },
+    { id: "phone", title: "Phone" },
+    { id: "email", title: "Email" },
+    { id: "website", title: "Website" },
+    { id: "googleUrl", title: "Google Maps URL" },
+  ],
+});
+
+async function scrapeWebsiteForEmail(url) {
+  if (!url) return null;
+
   try {
-    const start = Date.now();
+    const agent = new https.Agent({ rejectUnauthorized: false });
+    const response = await axios.get(url, { httpsAgent: agent, timeout: 10000 });
+    const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}/gi;
+    const matches = response.data.match(emailRegex);
+    return matches ? matches.find(email => !email.includes('example.com')) || null : null;
+  } catch (error) {
+    console.warn(`⚠️ Failed to fetch email from ${url}: ${error.message}`);
+    return null;
+  }
+}
 
-    puppeteerExtra.use(stealthPlugin());
+// Scrolls the Google Maps listings panel
+async function autoScroll(page) {
+  console.log("⏬ Scrolling page...");
 
-    const browser = await puppeteerExtra.launch({
-      headless: false,
-      executablePath: "",
+  const feedExists = await page.$('div[role="feed"]');
+  if (!feedExists) throw new Error("Google Maps feed panel not found.");
+
+  await page.evaluate(async () => {
+    const wrapper = document.querySelector('div[role="feed"]');
+    if (!wrapper) return;
+
+    await new Promise((resolve) => {
+      let totalHeight = 0;
+      const distance = 1000;
+      const scrollDelay = 2000;
+
+      const timer = setInterval(async () => {
+        const scrollHeightBefore = wrapper.scrollHeight;
+        wrapper.scrollBy(0, distance);
+        totalHeight += distance;
+
+        if (totalHeight >= scrollHeightBefore) {
+          totalHeight = 0;
+          await new Promise((res) => setTimeout(res, scrollDelay));
+          const scrollHeightAfter = wrapper.scrollHeight;
+
+          if (scrollHeightAfter <= scrollHeightBefore) {
+            clearInterval(timer);
+            resolve();
+          }
+        }
+      }, 700);
     });
+  });
+}
 
-    const page = await browser.newPage();
+// Main scraping logic
+async function scrapeDentists() {
+  const browser = await puppeteerExtra.launch({
+    headless: "new",
+    protocolTimeout: 180000,
+    timeout: 180000,
+    executablePath: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+  });
 
-    const query = "Toko bangunan di depok";
+  const results = [];
+  let index = 1;
 
-    try {
-      await page.goto(
-        `https://www.google.com/maps/search/${query.split(" ").join("+")}`
-      );
-    } catch (error) {
-      console.log("error going to page");
-    }
+  for (const city of cities) {
+    let attempt = 0;
+    let citySuccess = false;
 
-    async function autoScroll(page) {
-      await page.evaluate(async () => {
-        const wrapper = document.querySelector('div[role="feed"]');
+    while (attempt < 2 && !citySuccess) {
+      let page;
+      try {
+        attempt++;
+        console.log(`\n🔍 Scraping city: ${city} (Attempt ${attempt})`);
 
-        await new Promise((resolve, reject) => {
-          let totalHeight = 0;
-          let distance = 1000;
-          let scrollDelay = 3000;
+        const query = `dentist in ${city}, Hungary`;
+        page = await browser.newPage();
 
-          let timer = setInterval(async () => {
-            let scrollHeightBefore = wrapper.scrollHeight;
-            wrapper.scrollBy(0, distance);
-            totalHeight += distance;
-
-            if (totalHeight >= scrollHeightBefore) {
-              totalHeight = 0;
-              await new Promise((resolve) => setTimeout(resolve, scrollDelay));
-
-              // Calculate scrollHeight after waiting
-              let scrollHeightAfter = wrapper.scrollHeight;
-
-              if (scrollHeightAfter > scrollHeightBefore) {
-                // More content loaded, keep scrolling
-                return;
-              } else {
-                // No more content loaded, stop scrolling
-                clearInterval(timer);
-                resolve();
-              }
-            }
-          }, 700);
+        console.log("🌐 Loading Google Maps...");
+        await page.goto(`https://www.google.com/maps/search/${query.split(" ").join("+")}`, {
+          waitUntil: "domcontentloaded",
+          timeout: 60000,
         });
-      });
+
+        await Promise.race([
+          autoScroll(page),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("Scroll timeout")), 90000)
+          ),
+        ]);
+
+        console.log(`Done scrolling in ${city}`);
+
+        const html = await page.content();
+        const $ = cheerio.load(html);
+        const aTags = $("a");
+        const parents = [];
+
+        aTags.each((_, el) => {
+          const href = $(el).attr("href");
+          if (href && href.includes("/maps/place/")) {
+            parents.push($(el).parent());
+          }
+        });
+
+        console.log(`Found ${parents.length} listings in ${city}`);
+
+        for (const parent of parents) {
+          const url = parent.find("a").attr("href");
+          const website = parent.find('a[data-value="Website"]').attr("href") || "";
+          const clinicName = parent.find("div.fontHeadlineSmall").text().trim();
+
+          const bodyDiv = parent.find("div.fontBodyMedium").first();
+          const children = bodyDiv.children();
+          const lastChild = children.last();
+          const firstOfLast = lastChild.children().first();
+          const lastOfLast = lastChild.children().last();
+
+          const address = firstOfLast?.text()?.split("·")?.[1]?.trim() || "";
+          const phone = lastOfLast?.text()?.split("·")?.[1]?.trim() || "";
+          const email = website ? await scrapeWebsiteForEmail(website) : "";
+
+          console.log(`📝 (${index}) ${clinicName} - ${email || "no email"}`);
+
+          results.push({
+            index: index++,
+            clinicName,
+            dentistName: "",
+            address,
+            phone,
+            email,
+            website,
+            googleUrl: url,
+          });
+
+          if (results.length >= 500) {
+            console.log("Reached 500 records.");
+            break;
+          }
+        }
+
+        citySuccess = true;
+      } catch (err) {
+        console.warn(`Scraping failed in ${city} (Attempt ${attempt}): ${err.message}`);
+        if (attempt >= 2) console.error(`Skipping ${city} after 2 failed attempts.`);
+      } finally {
+        if (page) {
+          try {
+            await page.close();
+          } catch (_) {}
+        }
+      }
+
+      if (results.length >= 500) break;
     }
 
-    await autoScroll(page);
-
-    const html = await page.content();
-    const pages = await browser.pages();
-    await Promise.all(pages.map((page) => page.close()));
-
-    await browser.close();
-    console.log("browser closed");
-
-    // get all a tag parent where a tag href includes /maps/place/
-    const $ = cheerio.load(html);
-    const aTags = $("a");
-    const parents = [];
-    aTags.each((i, el) => {
-      const href = $(el).attr("href");
-      if (!href) {
-        return;
-      }
-      if (href.includes("/maps/place/")) {
-        parents.push($(el).parent());
-      }
-    });
-
-    console.log("parents", parents.length);
-
-    const buisnesses = [];
-    let index = 0;
-
-    parents.forEach((parent) => {
-      const url = parent.find("a").attr("href");
-      // get a tag where data-value="Website"
-      const website = parent.find('a[data-value="Website"]').attr("href");
-      // find a div that includes the class fontHeadlineSmall
-      const storeName = parent.find("div.fontHeadlineSmall").text();
-      // find span that includes class fontBodyMedium
-      const ratingText = parent
-        .find("span.fontBodyMedium > span")
-        .attr("aria-label");
-
-      // get the first div that includes the class fontBodyMedium
-      const bodyDiv = parent.find("div.fontBodyMedium").first();
-      const children = bodyDiv.children();
-      const lastChild = children.last();
-      const firstOfLast = lastChild.children().first();
-      const lastOfLast = lastChild.children().last();
-      index = index + 1;
-      
-      buisnesses.push({
-        index,
-        storeName,
-        placeId: `ChI${url?.split("?")?.[0]?.split("ChI")?.[1]}`,
-        address: firstOfLast?.text()?.split("·")?.[1]?.trim(),
-        category: firstOfLast?.text()?.split("·")?.[0]?.trim(),
-        phone: lastOfLast?.text()?.split("·")?.[1]?.trim(),
-        googleUrl: url,
-        bizWebsite: website,
-        ratingText,
-        stars: ratingText?.split("Bintang")?.[0]?.trim()
-          ? Number(ratingText?.split("Bintang")?.[0]?.trim())
-          : null,
-        numberOfReviews: ratingText
-          ?.split("Bintang")?.[1]
-          ?.replace("Ulasan", "")
-          ?.trim()
-          ? Number(
-              ratingText?.split("Bintang")?.[1]?.replace("Ulasan", "")?.trim()
-            )
-          : null,
-      });
-    });
-    const end = Date.now();
-
-    console.log(`time in seconds ${Math.floor((end - start) / 1000)}`);
-
-    return buisnesses;
-  } catch (error) {
-    console.log("error at googleMaps", error.message);
+    if (results.length >= 500) break;
   }
+
+  await browser.close();
+  return results;
 }
 
-async function init() {
+// Entry point
+(async function () {
   try {
-    const places = await searchGoogleMaps();
+    const data = await scrapeDentists();
 
-    const csvWriter = createObjectCsvWriter({
-      path: 'Toko_Bangunan_Di_Depok.csv',
-      header: [
-        { id: 'index', title: 'Index'},
-        { id: 'storeName', title: 'Store Name' },
-        { id: 'address', title: 'Address' },
-        { id: 'category', title: 'Category' },
-        { id: 'phone', title: 'Phone' },
-        { id: 'googleUrl', title: 'Google URL' },
-        { id: 'bizWebsite', title: 'Business Website' },
-        { id: 'ratingText', title: 'Rating Text' },
-        { id: 'stars', title: 'Stars' },
-        { id: 'numberOfReviews', title: 'Number of Reviews' },
-      ],
-    });
+    console.log("💾 Writing CSV...");
+    await csvWriter.writeRecords(data);
+    console.log("\nData successfully saved to Hungary_Dentists.csv");
 
-    // Write the places data to the CSV file
-    await csvWriter.writeRecords(places);
-
-    console.log('CSV file created successfully.');
+    process.exit(0);
   } catch (error) {
-    console.log('Error in init:', error.message);
+    console.error("Scraping failed:", error.message);
+    process.exit(1);
   }
-}
+})();
