@@ -2,22 +2,16 @@ import * as cheerio from "cheerio";
 import puppeteerExtra from "puppeteer-extra";
 import stealthPlugin from "puppeteer-extra-plugin-stealth";
 import { createObjectCsvWriter } from "csv-writer";
-import axios from "axios";
-import * as https from "https";
-import fs from "fs";
-
 
 puppeteerExtra.use(stealthPlugin());
 
-
-const cities = ["Budapest", "Debrecen", "Szeged", "Miskolc", "Pécs", "Győr"];
+const countries = ["England", "Ireland", "Scotland", "Wales"];
 
 const csvWriter = createObjectCsvWriter({
-  path: "Hungary_Dentists.csv",
+  path: "UK_Reiki_Prakts.csv",
   header: [
     { id: "index", title: "Index" },
-    { id: "clinicName", title: "Clinic Name" },
-    { id: "dentistName", title: "Dentist Name" },
+    { id: "practitionerName", title: "Practitioner Name" },
     { id: "address", title: "Address" },
     { id: "phone", title: "Phone" },
     { id: "email", title: "Email" },
@@ -26,25 +20,55 @@ const csvWriter = createObjectCsvWriter({
   ],
 });
 
-async function scrapeWebsiteForEmail(url) {
+async function scrapeWebsiteForEmail(url, browser) {
+  console.log(`🌐 Trying to extract email from: ${url}`);
   if (!url) return null;
 
+  const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}/gi;
+  const possiblePaths = ["", "/contact", "/contact-us", "/about", "/about-us"];
+  let email = null;
+
+  const page = await browser.newPage();
   try {
-    const agent = new https.Agent({ rejectUnauthorized: false });
-    const response = await axios.get(url, { httpsAgent: agent, timeout: 10000 });
-    const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}/gi;
-    const matches = response.data.match(emailRegex);
-    return matches ? matches.find(email => !email.includes('example.com')) || null : null;
+    for (const path of possiblePaths) {
+      const targetUrl = path ? `${url.replace(/\/$/, "")}${path}` : url;
+      console.log(`📡 Navigating to: ${targetUrl}`);
+      await page.goto(targetUrl, { waitUntil: "networkidle2", timeout: 15000 });
+
+      // Check for mailto links
+      const mailtoLinks = await page.$$eval('a[href^="mailto:"]', links =>
+        links.map(link => link.href.replace("mailto:", "").trim()));
+      if (mailtoLinks.length) {
+        email = mailtoLinks.find(e => emailRegex.test(e));
+        if (email) {
+          console.log(`📧 Email found in mailto: ${email}`);
+          return email;
+        }
+      }
+
+      // Check page content for emails
+      const content = await page.content();
+      const matches = content.match(emailRegex);
+      if (matches) {
+        email = matches.find(e => !e.includes("example.com") && !e.includes("w3.org")) || null;
+        if (email) {
+          console.log(`📧 Email found in text: ${email}`);
+          return email;
+        }
+      }
+    }
+    console.warn(`⚠️ No valid email found on ${url}`);
+    return null;
   } catch (error) {
     console.warn(`⚠️ Failed to fetch email from ${url}: ${error.message}`);
     return null;
+  } finally {
+    await page.close();
   }
 }
 
-// Scrolls the Google Maps listings panel
 async function autoScroll(page) {
-  console.log("⏬ Scrolling page...");
-
+  console.log("⏬ Scrolling the listings on the Google Maps results page...");
   const feedExists = await page.$('div[role="feed"]');
   if (!feedExists) throw new Error("Google Maps feed panel not found.");
 
@@ -54,13 +78,14 @@ async function autoScroll(page) {
 
     await new Promise((resolve) => {
       let totalHeight = 0;
-      const distance = 1000;
-      const scrollDelay = 2000;
+      const distance = 2000;
+      const scrollDelay = 3000;
 
       const timer = setInterval(async () => {
         const scrollHeightBefore = wrapper.scrollHeight;
         wrapper.scrollBy(0, distance);
         totalHeight += distance;
+        console.log("🌀 Scrolling...");
 
         if (totalHeight >= scrollHeightBefore) {
           totalHeight = 0;
@@ -68,17 +93,55 @@ async function autoScroll(page) {
           const scrollHeightAfter = wrapper.scrollHeight;
 
           if (scrollHeightAfter <= scrollHeightBefore) {
+            console.log("📦 Done scrolling listings.");
             clearInterval(timer);
             resolve();
           }
         }
-      }, 700);
+      }, 1000);
     });
   });
 }
 
-// Main scraping logic
-async function scrapeDentists() {
+async function scrapeListingDetails(page, googleUrl) {
+  let website = "";
+  try {
+    console.log(`🔍 Navigating to listing details: ${googleUrl}`);
+    await page.goto(googleUrl, { waitUntil: "networkidle2", timeout: 30000 });
+    const content = await page.content();
+    const $ = cheerio.load(content);
+
+    // Try multiple selectors for website
+    const websiteLink = $('a[href*="http"]:not([href*="google.com"])');
+    if (websiteLink.length) {
+      website = websiteLink.attr("href") || "";
+      console.log(`🔗 Found website link: ${website}`);
+    } else {
+      console.log(`🔍 No website link found in details page, checking text...`);
+      const potentialWebsite = $('div').filter((_, el) => {
+        const text = $(el).text().trim();
+        return text.match(/^(https?:\/\/)?([\w-]+\.)+[\w-]{2,}(\/.*)?$/i);
+      }).first().text().trim();
+      website = potentialWebsite ? (potentialWebsite.startsWith('http') ? potentialWebsite : `https://${potentialWebsite}`) : "";
+      console.log(`🔍 Potential website text: ${website || "None"}`);
+    }
+
+    // Validate website
+    const urlRegex = /^(https?:\/\/)?([\w-]+\.)+[\w-]{2,}(\/.*)?$/i;
+    if (website && !urlRegex.test(website)) {
+      console.warn(`⚠️ Invalid website URL: ${website}`);
+      website = "";
+    }
+
+    return website;
+  } catch (error) {
+    console.warn(`⚠️ Failed to scrape details page ${googleUrl}: ${error.message}`);
+    return "";
+  }
+}
+
+async function scrapeReikiPractitioners() {
+  console.log("🚀 Launching Puppeteer browser...");
   const browser = await puppeteerExtra.launch({
     headless: "new",
     protocolTimeout: 180000,
@@ -90,39 +153,37 @@ async function scrapeDentists() {
   const results = [];
   let index = 1;
 
-  for (const city of cities) {
+  const concurrencyLimit = 2;
+  const countryPromises = countries.map((country) => async () => {
     let attempt = 0;
-    let citySuccess = false;
+    let countrySuccess = false;
+    let page;
 
-    while (attempt < 2 && !citySuccess) {
-      let page;
+    while (attempt < 2 && !countrySuccess && results.length < 100) {
       try {
         attempt++;
-        console.log(`\n🔍 Scraping city: ${city} (Attempt ${attempt})`);
-
-        const query = `dentist in ${city}, Hungary`;
+        console.log(`🔍 Searching for Reiki practitioners in ${country} (Attempt ${attempt})`);
         page = await browser.newPage();
-
-        console.log("🌐 Loading Google Maps...");
-        await page.goto(`https://www.google.com/maps/search/${query.split(" ").join("+")}`, {
+        const query = `Reiki practitioner in ${country}`;
+        const searchUrl = `https://www.google.com/maps/search/${query.split(" ").join("+")}`;
+        console.log(`🌍 Navigating to: ${searchUrl}`);
+        await page.goto(searchUrl, {
           waitUntil: "domcontentloaded",
           timeout: 60000,
         });
 
         await Promise.race([
           autoScroll(page),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error("Scroll timeout")), 90000)
-          ),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("Scroll timeout")), 90000)),
         ]);
 
-        console.log(`Done scrolling in ${city}`);
-
+        console.log("📄 Extracting HTML content...");
         const html = await page.content();
         const $ = cheerio.load(html);
         const aTags = $("a");
         const parents = [];
 
+        console.log("🔎 Locating map listing URLs...");
         aTags.each((_, el) => {
           const href = $(el).attr("href");
           if (href && href.includes("/maps/place/")) {
@@ -130,76 +191,81 @@ async function scrapeDentists() {
           }
         });
 
-        console.log(`Found ${parents.length} listings in ${city}`);
+        console.log(`📌 Found ${parents.length} listing containers.`);
 
         for (const parent of parents) {
-          const url = parent.find("a").attr("href");
-          const website = parent.find('a[data-value="Website"]').attr("href") || "";
-          const clinicName = parent.find("div.fontHeadlineSmall").text().trim();
-
+          console.log("📥 Extracting info from a listing...");
+          const googleUrl = parent.find("a").attr("href") || "";
+          const practitionerName = parent.find("div.fontHeadlineSmall").text().trim();
           const bodyDiv = parent.find("div.fontBodyMedium").first();
           const children = bodyDiv.children();
           const lastChild = children.last();
           const firstOfLast = lastChild.children().first();
           const lastOfLast = lastChild.children().last();
-
           const address = firstOfLast?.text()?.split("·")?.[1]?.trim() || "";
           const phone = lastOfLast?.text()?.split("·")?.[1]?.trim() || "";
-          const email = website ? await scrapeWebsiteForEmail(website) : "";
 
-          console.log(`📝 (${index}) ${clinicName} - ${email || "no email"}`);
+          // Try to find website in main listing
+          let website = "";
+          const websiteLink = parent.find('a[href*="http"]:not([href*="google.com"])');
+          if (websiteLink.length) {
+            website = websiteLink.attr("href") || "";
+            console.log(`🔗 Found website in main listing: ${website}`);
+          } else {
+            console.log(`🔍 No website in main listing for ${practitionerName}, checking details page...`);
+            website = await scrapeListingDetails(page, googleUrl);
+          }
+
+          const email = website ? await scrapeWebsiteForEmail(website, browser) : "";
+
+          console.log(`✅ Collected: ${practitionerName || "Unnamed"} | ${address} | ${phone} | ${email || "No email"} | ${website || "No website"}`);
 
           results.push({
             index: index++,
-            clinicName,
-            dentistName: "",
+            practitionerName,
             address,
             phone,
             email,
             website,
-            googleUrl: url,
+            googleUrl,
           });
 
-          if (results.length >= 500) {
-            console.log("Reached 500 records.");
-            break;
-          }
+          await new Promise(resolve => setTimeout(resolve, 1000));
+
+          if (results.length >= 100) break;
         }
 
-        citySuccess = true;
+        countrySuccess = true;
       } catch (err) {
-        console.warn(`Scraping failed in ${city} (Attempt ${attempt}): ${err.message}`);
-        if (attempt >= 2) console.error(`Skipping ${city} after 2 failed attempts.`);
+        console.warn(`⚠️ Error in ${country} (Attempt ${attempt}): ${err.message}`);
       } finally {
-        if (page) {
-          try {
-            await page.close();
-          } catch (_) {}
-        }
+        if (page) await page.close();
       }
-
-      if (results.length >= 500) break;
     }
+  });
 
-    if (results.length >= 500) break;
-  }
+  await Promise.all(countryPromises.map(async (task, i) => {
+    if (i % concurrencyLimit === 0) await task();
+    else await new Promise(resolve => setTimeout(resolve, i * 1000)).then(task);
+  }));
 
+  console.log("🧹 Closing browser...");
   await browser.close();
   return results;
 }
 
-// Entry point
 (async function () {
   try {
-    const data = await scrapeDentists();
+    console.log("🎬 Starting scrape process...");
+    const data = await scrapeReikiPractitioners();
 
-    console.log("💾 Writing CSV...");
+    console.log("💾 Writing data to CSV...");
     await csvWriter.writeRecords(data);
-    console.log("\nData successfully saved to Hungary_Dentists.csv");
+    console.log("✅ Successfully saved data to UK_Reiki_Prakts.csv");
 
     process.exit(0);
   } catch (error) {
-    console.error("Scraping failed:", error.message);
+    console.error("❌ Scraping failed:", error.message);
     process.exit(1);
   }
 })();
