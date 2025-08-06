@@ -1,8 +1,8 @@
 import pandas as pd
 
 # === Configuration ===
-INPUT_CSV = "UK_Reiki_Prakts_EUROPE.csv"  # Original file
-OUTPUT_CSV = "data_cleaned.csv"  # Cleaned output
+INPUT_CSV = "USA_Reiki_Prakts.csv"  # Original file
+OUTPUT_CSV = "USA_data_cleaned.csv"  # Cleaned output
 IDENTIFY_DUPLICATES_ON = ["Index", "Email", "Phone", "Practitioner Name", "Website", "Google Maps URL"]  # Columns to identify duplicates
 REQUIRED_FIELDS = ["Index", "Email", "Phone", "Practitioner Name", "Website", "Google Maps URL"]
 
