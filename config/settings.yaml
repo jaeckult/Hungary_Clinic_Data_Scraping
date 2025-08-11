@@ -1,0 +1,89 @@
+# Google Maps Scraping Project Configuration
+
+# Application settings
+app:
+  name: "Google Maps Scraping"
+  version: "1.0.0"
+  environment: "development"  # development, staging, production
+  debug: true
+
+# Logging configuration
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/app.log"
+  max_size: "10MB"
+  backup_count: 5
+  console_output: true
+
+# Data processing settings
+data:
+  encoding: "utf-8"
+  chunk_size: 10000
+  max_rows: null  # null for all rows
+  backup_original: true
+  compression: "gzip"  # gzip, bz2, zip, or null
+
+# Scraping settings
+scraping:
+  google_maps:
+    base_url: "https://www.google.com/maps"
+    search_delay: 2.0  # seconds between requests
+    max_retries: 3
+    timeout: 30
+    user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    headless: true
+    proxy_enabled: false
+    proxy_list: []
+  
+  rate_limiting:
+    requests_per_minute: 30
+    requests_per_hour: 1000
+    cooldown_period: 60  # seconds
+
+# Database settings (if needed)
+database:
+  enabled: false
+  type: "sqlite"  # sqlite, postgresql, mysql
+  host: "localhost"
+  port: 5432
+  name: "maps_scraping"
+  user: ""
+  password: ""
+
+# Export settings
+export:
+  formats: ["csv", "json", "excel"]
+  default_format: "csv"
+  include_timestamp: true
+  compression: true
+
+# Validation settings
+validation:
+  required_fields: ["name", "address", "phone"]
+  optional_fields: ["website", "rating", "reviews"]
+  data_types:
+    name: "string"
+    address: "string"
+    phone: "string"
+    website: "string"
+    rating: "float"
+    reviews: "integer"
+
+# Monitoring and alerts
+monitoring:
+  enabled: true
+  metrics_interval: 300  # seconds
+  alert_thresholds:
+    error_rate: 0.05  # 5%
+    response_time: 10.0  # seconds
+    memory_usage: 0.8  # 80%
+
+# Security settings
+security:
+  api_keys:
+    google_maps: ""
+    proxy_service: ""
+  encryption:
+    enabled: false
+    algorithm: "AES-256"
